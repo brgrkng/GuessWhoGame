@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TALLY — a guessing game of television</title>
+<meta name="description" content="Two-player Guess Who, played across ten television shows.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ══ BOOT / ERROR ══ -->
+  <section class="screen" id="screen-boot">
+    <div class="boot">
+      <div class="boot-mark">TALLY</div>
+      <p class="boot-status" id="boot-status">Connecting to the gallery…</p>
+    </div>
+  </section>
+
+  <!-- ══ LOBBY ══ -->
+  <section class="screen" id="screen-lobby" hidden>
+    <header class="masthead">
+      <div class="mark">TALLY</div>
+      <div class="mark-sub">Guess Who · Television Edition</div>
+    </header>
+
+    <div class="lobby">
+      <div class="panel signon">
+        <div class="panel-label">Sign on</div>
+        <label class="field">
+          <span>Your name</span>
+          <input id="name-input" type="text" maxlength="14" placeholder="e.g. Mesba" autocomplete="off">
+        </label>
+        <div class="field">
+          <span>Your marker</span>
+          <div class="emoji-grid" id="emoji-grid"></div>
+        </div>
+        <button class="btn btn-primary" id="btn-join">Enter the lobby</button>
+        <p class="hint" id="signon-hint"></p>
+      </div>
+
+      <div class="panel roster">
+        <div class="panel-label">In the lobby <span class="count" id="roster-count">0</span></div>
+        <ul class="roster-list" id="roster-list"></ul>
+        <p class="empty" id="roster-empty">Nobody here yet. Open this page in a second browser or send the link to your opponent.</p>
+        <div class="ready-bar" id="ready-bar" hidden>
+          <button class="btn btn-ready" id="btn-ready">Ready up</button>
+          <p class="hint">The first two players to ready up are paired.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ SHOW PICKER ══ -->
+  <section class="screen" id="screen-show" hidden>
+    <header class="masthead slim">
+      <div class="mark">TALLY</div>
+      <div class="mark-sub" id="show-subtitle">Choosing tonight's schedule</div>
+    </header>
+    <div class="showpick" id="showpick"></div>
+    <div class="waiting" id="show-waiting" hidden>
+      <div class="spin"></div>
+      <p id="show-waiting-text">Your opponent is picking the show.</p>
+    </div>
+  </section>
+
+  <!-- ══ GAME ══ -->
+  <section class="screen screen-game" id="screen-game" hidden>
+    <div class="console">
+      <div class="console-left">
+        <div class="show-tag" id="game-show">—</div>
+        <div class="secret" id="secret-card">
+          <div class="secret-label">You are</div>
+          <div class="secret-name" id="secret-name">—</div>
+        </div>
+      </div>
+      <div class="console-mid">
+        <div class="clock" id="clock">0:00</div>
+        <div class="clock-label" id="clock-label">Turn time</div>
+      </div>
+      <div class="console-right">
+        <div class="seat" id="seat-me"></div>
+        <div class="seat" id="seat-them"></div>
+        <button class="btn btn-end" id="btn-end">End turn</button>
+      </div>
+    </div>
+
+    <p class="turn-banner" id="turn-banner">—</p>
+
+    <div class="board" id="board"></div>
+
+    <ul class="feed" id="feed"></ul>
+
+    <button class="leave" id="btn-leave">Leave this game</button>
+  </section>
+
+  <!-- ══ RESULT ══ -->
+  <section class="screen" id="screen-result" hidden>
+    <div class="result">
+      <div class="result-verdict" id="result-verdict">—</div>
+      <p class="result-line" id="result-line">—</p>
+      <div class="reveal" id="reveal"></div>
+      <button class="btn btn-primary" id="btn-again">Back to the lobby</button>
+    </div>
+  </section>
+
+</div>
+
+<!-- ══ CARD ACTION SHEET ══ -->
+<div class="overlay" id="overlay" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-name">
+    <div class="sheet-name" id="sheet-name">—</div>
+    <div class="sheet-actions">
+      <button class="act act-cross" id="act-cross">
+        <span class="act-glyph">✕</span>
+        <span class="act-label" id="act-cross-label">Cross off</span>
+      </button>
+      <button class="act act-guess" id="act-guess">
+        <span class="act-glyph">✓</span>
+        <span class="act-label">Guess</span>
+      </button>
+    </div>
+    <div class="sheet-confirm" id="sheet-confirm" hidden>
+      <p>Lock in <strong id="confirm-name">—</strong> as your opponent's character? A wrong guess hands them the turn.</p>
+      <div class="sheet-confirm-actions">
+        <button class="btn btn-ghost" id="confirm-no">Not yet</button>
+        <button class="btn btn-danger" id="confirm-yes">Lock it in</button>
+      </div>
+    </div>
+    <button class="sheet-close" id="sheet-close" aria-label="Close">Close</button>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

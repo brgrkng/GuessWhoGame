@@ -1,0 +1,643 @@
+/* ============================================================
+   TALLY — two-player Guess Who across ten television shows
+   Firebase Realtime Database + anonymous auth. No build step.
+   ============================================================ */
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+import { getAuth, signInAnonymously, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+import { getDatabase, ref, set, update, remove, onValue, onDisconnect,
+         runTransaction, serverTimestamp, push }
+  from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
+
+import { SHOWS } from "./characters.js";
+
+/* ─────────────────────────────────────────────────────────────
+   1. PASTE YOUR FIREBASE CONFIG HERE
+   Firebase Console → Project settings → Your apps → Web app.
+   databaseURL only appears once a Realtime Database exists.
+   ───────────────────────────────────────────────────────────── */
+const FIREBASE_CONFIG = {
+  apiKey:            "PASTE_API_KEY",
+  authDomain:        "PASTE_PROJECT.firebaseapp.com",
+  databaseURL:       "https://PASTE_PROJECT-default-rtdb.firebaseio.com",
+  projectId:         "PASTE_PROJECT",
+  storageBucket:     "PASTE_PROJECT.appspot.com",
+  messagingSenderId: "PASTE_SENDER_ID",
+  appId:             "PASTE_APP_ID"
+};
+
+const EMOJIS = ["🦊","🐼","🐙","🐸","🦖","🐝","🦉","🐺",
+                "🦈","🐧","🦩","🐲","👽","🤖","🎃","👻",
+                "🍕","🍩","🌮","⚡","🔥","🌙","⭐","🎧"];
+
+/* ── element shorthand ──────────────────────────────────────── */
+const $ = id => document.getElementById(id);
+const el = {
+  screens: {
+    boot:   $("screen-boot"),
+    lobby:  $("screen-lobby"),
+    show:   $("screen-show"),
+    game:   $("screen-game"),
+    result: $("screen-result")
+  },
+  bootStatus: $("boot-status"),
+  nameInput: $("name-input"), emojiGrid: $("emoji-grid"),
+  btnJoin: $("btn-join"), signonHint: $("signon-hint"),
+  rosterList: $("roster-list"), rosterEmpty: $("roster-empty"),
+  rosterCount: $("roster-count"), readyBar: $("ready-bar"), btnReady: $("btn-ready"),
+  showpick: $("showpick"), showWaiting: $("show-waiting"),
+  showWaitingText: $("show-waiting-text"), showSubtitle: $("show-subtitle"),
+  gameShow: $("game-show"), secretName: $("secret-name"),
+  clock: $("clock"), clockLabel: $("clock-label"),
+  seatMe: $("seat-me"), seatThem: $("seat-them"), btnEnd: $("btn-end"),
+  turnBanner: $("turn-banner"), board: $("board"), feed: $("feed"),
+  overlay: $("overlay"), sheetName: $("sheet-name"),
+  actCross: $("act-cross"), actCrossLabel: $("act-cross-label"), actGuess: $("act-guess"),
+  sheetConfirm: $("sheet-confirm"), confirmName: $("confirm-name"),
+  confirmNo: $("confirm-no"), confirmYes: $("confirm-yes"), sheetClose: $("sheet-close"),
+  resultVerdict: $("result-verdict"), resultLine: $("result-line"),
+  reveal: $("reveal"), btnAgain: $("btn-again"),
+  toast: $("toast")
+};
+
+/* ── state ──────────────────────────────────────────────────── */
+let db, auth, uid = null;
+let me = { name: "", emoji: "" };
+let lobbySnapshot = {};          // whole /lobby
+let pendingGameId = null;        // id we would use if we win the pairing
+let gameId = null;
+let G = { meta:null, players:null, log:null, pending:null, presence:null, identity:null };
+let show = null;                 // resolved show object
+let crossed = new Set();
+let unsubs = [];
+let clockTimer = null;
+let serverOffset = 0;
+let openCard = null;
+let adjudicating = false;
+let assigning = false;
+let revealPublished = false;
+
+/* ── helpers ────────────────────────────────────────────────── */
+function screen(name){
+  for (const [k,node] of Object.entries(el.screens)) node.hidden = (k !== name);
+}
+function toast(msg, ms = 2600){
+  el.toast.textContent = msg;
+  el.toast.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.toast.hidden = true; }, ms);
+}
+function now(){ return Date.now() + serverOffset; }
+function mmss(ms){
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+function otherUid(){
+  if (!G.players) return null;
+  return Object.keys(G.players).find(k => k !== uid) || null;
+}
+function track(unsub){ unsubs.push(unsub); }
+function dropListeners(){ unsubs.forEach(f => { try { f(); } catch(e){} }); unsubs = []; }
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+(async function boot(){
+  if (FIREBASE_CONFIG.apiKey === "PASTE_API_KEY"){
+    return fail("No Firebase config yet. Open app.js and fill in FIREBASE_CONFIG near the top.");
+  }
+  try {
+    const app = initializeApp(FIREBASE_CONFIG);
+    db   = getDatabase(app);
+    auth = getAuth(app);
+
+    onValue(ref(db, ".info/serverTimeOffset"), s => { serverOffset = s.val() || 0; });
+
+    await signInAnonymously(auth);
+    onAuthStateChanged(auth, user => {
+      if (!user) return;
+      uid = user.uid;
+      startLobby();
+    });
+  } catch (err){
+    if (String(err.code).includes("operation-not-allowed")){
+      fail("Anonymous sign-in is switched off. Firebase Console → Authentication → Sign-in method → enable Anonymous, then reload.");
+    } else {
+      fail("Could not reach Firebase: " + (err.message || err));
+    }
+  }
+})();
+
+function fail(msg){
+  screen("boot");
+  el.bootStatus.textContent = msg;
+  el.bootStatus.classList.add("bad");
+}
+
+/* ============================================================
+   LOBBY
+   ============================================================ */
+function startLobby(){
+  buildEmojiGrid();
+  screen("lobby");
+
+  track(onValue(ref(db, "lobby"), snap => {
+    lobbySnapshot = snap.val() || {};
+    renderRoster();
+    const mine = lobbySnapshot[uid];
+    if (mine && mine.gameId && mine.gameId !== gameId) enterGame(mine.gameId);
+  }));
+}
+
+function buildEmojiGrid(){
+  el.emojiGrid.innerHTML = "";
+  EMOJIS.forEach(e => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = e;
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", () => {
+      me.emoji = e;
+      [...el.emojiGrid.children].forEach(c =>
+        c.setAttribute("aria-pressed", String(c.textContent === e)));
+      if (inLobby()) update(ref(db, `lobby/${uid}`), { emoji: e });
+    });
+    el.emojiGrid.appendChild(b);
+  });
+}
+
+function inLobby(){ return !!lobbySnapshot[uid]; }
+
+function renderRoster(){
+  const takenEmoji = new Set(
+    Object.entries(lobbySnapshot).filter(([k]) => k !== uid).map(([,v]) => v.emoji));
+  [...el.emojiGrid.children].forEach(b => { b.disabled = takenEmoji.has(b.textContent); });
+
+  const rows = Object.entries(lobbySnapshot)
+    .sort((a,b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
+
+  el.rosterCount.textContent = String(rows.length);
+  el.rosterEmpty.hidden = rows.length > 0;
+  el.rosterList.innerHTML = "";
+
+  rows.forEach(([k,v]) => {
+    const li = document.createElement("li");
+    if (k === uid) li.classList.add("me");
+    const state = v.gameId ? "in a game" : v.ready ? "ready" : "waiting";
+    li.innerHTML = `<span class="pip"></span>
+                    <span class="who"></span>
+                    <span class="state${v.ready && !v.gameId ? " on" : ""}"></span>`;
+    li.querySelector(".pip").textContent = v.emoji || "•";
+    li.querySelector(".who").textContent = v.name + (k === uid ? " (you)" : "");
+    li.querySelector(".state").textContent = state;
+    el.rosterList.appendChild(li);
+  });
+
+  const mine = lobbySnapshot[uid];
+  el.readyBar.hidden = !mine;
+  if (mine){
+    el.btnReady.dataset.on = mine.ready ? "1" : "0";
+    el.btnReady.textContent = mine.ready ? "Cancel ready" : "Ready up";
+  }
+  if (mine && mine.ready && !mine.gameId) tryMatch();
+}
+
+el.btnJoin.addEventListener("click", async () => {
+  const name = el.nameInput.value.trim();
+  if (!name)      return hintSignon("Type a name first.");
+  if (!me.emoji)  return hintSignon("Pick a marker so your opponent can tell you apart.");
+  me.name = name;
+  hintSignon("");
+  el.btnJoin.disabled = true;
+  try {
+    await set(ref(db, `lobby/${uid}`), {
+      name, emoji: me.emoji, ready: false, gameId: null, joinedAt: serverTimestamp()
+    });
+    onDisconnect(ref(db, `lobby/${uid}`)).remove();
+    el.btnJoin.textContent = "You're in the lobby";
+  } catch (err){
+    el.btnJoin.disabled = false;
+    hintSignon("Write refused: " + (err.message || err));
+  }
+});
+function hintSignon(msg){
+  el.signonHint.textContent = msg;
+  el.signonHint.classList.toggle("bad", !!msg);
+}
+
+el.btnReady.addEventListener("click", () => {
+  const mine = lobbySnapshot[uid];
+  if (!mine) return;
+  update(ref(db, `lobby/${uid}`), { ready: !mine.ready });
+});
+
+/* ── pairing ────────────────────────────────────────────────
+   One shared lobby: the two earliest players who are ready and
+   not already in a game get matched. A transaction on /lobby
+   makes sure only one client can claim a given pair.
+   ──────────────────────────────────────────────────────────── */
+async function tryMatch(){
+  if (tryMatch._busy || gameId) return;
+  const ready = Object.entries(lobbySnapshot).filter(([,v]) => v.ready && !v.gameId);
+  if (ready.length < 2) return;
+  tryMatch._busy = true;
+
+  const gid = pendingGameId || (pendingGameId = push(ref(db, "games")).key);
+
+  try {
+    const res = await runTransaction(ref(db, "lobby"), lobby => {
+      if (!lobby || !lobby[uid] || !lobby[uid].ready || lobby[uid].gameId) return;
+      const waiting = Object.entries(lobby)
+        .filter(([,v]) => v && v.ready && !v.gameId)
+        .sort((a,b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0) || a[0].localeCompare(b[0]));
+      if (waiting.length < 2) return;
+      const pair = waiting.slice(0, 2);
+      if (!pair.some(([k]) => k === uid)) return;   // not my turn to be paired
+      pair[0][1].gameId = gid; pair[0][1].seat = 1;
+      pair[1][1].gameId = gid; pair[1][1].seat = 2;
+      return lobby;
+    });
+
+    if (res.committed){
+      const lobby = res.snapshot.val() || {};
+      const pair = Object.entries(lobby).filter(([,v]) => v.gameId === gid);
+      if (pair.length === 2 && pair.some(([k]) => k === uid)) await createGame(gid, pair);
+    }
+  } catch (err){
+    console.warn("pairing failed", err);
+  } finally {
+    tryMatch._busy = false;
+  }
+}
+
+async function createGame(gid, pair){
+  const players = {};
+  pair.forEach(([k,v]) => { players[k] = { name: v.name, emoji: v.emoji, seat: v.seat }; });
+  await set(ref(db, `games/${gid}`), {
+    meta: { status: "choosing", show: null, turn: null, turnStartedAt: null,
+            createdAt: serverTimestamp() },
+    players
+  });
+}
+
+/* ============================================================
+   GAME
+   ============================================================ */
+function enterGame(gid){
+  dropListeners();
+  gameId = gid;
+  pendingGameId = null;
+  revealPublished = false;
+  G = { meta:null, players:null, log:null, pending:null, presence:null, identity:null };
+  show = null;
+  crossed = loadCrosses(gid);
+  assigning = false;
+  el.board.dataset.sig = "";
+
+  const base = `games/${gid}`;
+  set(ref(db, `${base}/presence/${uid}`), true);
+  onDisconnect(ref(db, `${base}/presence/${uid}`)).set(false);
+
+  track(onValue(ref(db, `${base}/meta`),       s => { G.meta = s.val();     render(); }));
+  track(onValue(ref(db, `${base}/players`),    s => { G.players = s.val();  render(); }));
+  track(onValue(ref(db, `${base}/presence`),   s => { G.presence = s.val(); render(); }));
+  track(onValue(ref(db, `${base}/pendingGuess`), s => { G.pending = s.val(); adjudicate(); render(); }));
+  track(onValue(ref(db, `${base}/log`),        s => { G.log = s.val();      onLog(); render(); }));
+  track(onValue(ref(db, `${base}/identities/${uid}`), s => {
+    G.identity = s.val(); adjudicate(); render();
+  }));
+  track(onValue(ref(db, `${base}/reveal`),     s => { G.revealData = s.val(); render(); }));
+}
+
+function mySeat(){ return G.players && G.players[uid] ? G.players[uid].seat : null; }
+
+function render(){
+  if (!G.meta || !G.players) return;
+  const st = G.meta.status;
+
+  if (st === "choosing")      return renderChoosing();
+  if (st === "playing")       return renderPlaying();
+  if (st === "finished")      return renderFinished();
+}
+
+/* ── show selection (seat 2 picks) ──────────────────────────── */
+function renderChoosing(){
+  screen("show");
+  const picked = !!G.meta.show;
+  const iPick = mySeat() === 2 && !picked;
+  el.showpick.hidden = !iPick;
+  el.showWaiting.hidden = iPick;
+  const them = G.players[otherUid()];
+
+  if (iPick){
+    el.showSubtitle.textContent = "You pick tonight's show";
+    if (!el.showpick.childElementCount){
+      SHOWS.forEach(s => {
+        const b = document.createElement("button");
+        b.className = "show-btn";
+        b.style.setProperty("--h", s.hue);
+        b.innerHTML = `<span class="t"></span><span class="n">18 characters</span>`;
+        b.querySelector(".t").textContent = s.title;
+        b.addEventListener("click", () => {
+          update(ref(db, `games/${gameId}/meta`), { show: s.id });
+        });
+        el.showpick.appendChild(b);
+      });
+    }
+  } else if (picked){
+    el.showSubtitle.textContent = "Dealing";
+    el.showWaitingText.textContent = "Shuffling the deck…";
+  } else {
+    el.showSubtitle.textContent = "Standing by";
+    el.showWaitingText.textContent =
+      `${them ? them.name : "Your opponent"} is picking the show.`;
+  }
+
+  maybeDeal();
+}
+
+/* Seat 2 picks the show; seat 1 deals the two secret characters.
+   Splitting the two jobs means neither player's client ever chooses
+   the show AND the answers. See README for the airtight version. */
+async function maybeDeal(){
+  if (assigning || mySeat() !== 1) return;
+  if (!G.meta || G.meta.status !== "choosing" || !G.meta.show) return;
+
+  assigning = true;
+  const s = SHOWS.find(x => x.id === G.meta.show);
+  const opp = otherUid();
+  const idx = new Set();
+  while (idx.size < 2) idx.add(Math.floor(Math.random() * s.characters.length));
+  const [a,b] = [...idx];
+
+  try {
+    await update(ref(db, `games/${gameId}`), {
+      [`identities/${uid}`]: s.characters[a].id,
+      [`identities/${opp}`]: s.characters[b].id,
+      "meta/turn": uid,
+      "meta/turnStartedAt": serverTimestamp(),
+      "meta/status": "playing"
+    });
+  } catch (err){
+    assigning = false;
+    console.warn("deal failed", err);
+  }
+}
+
+/* ── the board ──────────────────────────────────────────────── */
+function renderPlaying(){
+  screen("game");
+  show = SHOWS.find(s => s.id === G.meta.show);
+  if (!show) return;
+
+  document.documentElement.style.setProperty("--hue", show.hue);
+  el.board.style.setProperty("--h", show.hue);
+  el.gameShow.textContent = show.title;
+
+  const mineChar = show.characters.find(c => c.id === G.identity);
+  el.secretName.textContent = mineChar ? mineChar.name : "…";
+
+  const myTurn = G.meta.turn === uid;
+  const them = otherUid();
+  renderSeat(el.seatMe,   uid,  myTurn);
+  renderSeat(el.seatThem, them, !myTurn);
+
+  el.btnEnd.disabled = !myTurn;
+  el.turnBanner.className = "turn-banner " + (myTurn ? "live" : "wait");
+  el.turnBanner.textContent = myTurn
+    ? "You're live — cross off suspects or lock in a guess"
+    : `${G.players[them] ? G.players[them].name : "Opponent"} is thinking`;
+
+  if (G.pending && G.pending.by === uid){
+    el.turnBanner.className = "turn-banner wait";
+    el.turnBanner.textContent = "Guess locked in. Checking…";
+  }
+  if (G.presence && them && G.presence[them] === false){
+    el.turnBanner.className = "turn-banner wait";
+    el.turnBanner.textContent = "Your opponent dropped out. Wait, or head back to the lobby.";
+  }
+
+  buildBoard();
+  startClock();
+  renderFeed();
+}
+
+function renderSeat(node, id, live){
+  const p = id && G.players ? G.players[id] : null;
+  node.className = "seat" + (live ? " live" : "") +
+                   (G.presence && id && G.presence[id] === false ? " gone" : "");
+  node.innerHTML = `<span class="pip"></span><span class="nm"></span>`;
+  node.querySelector(".pip").textContent = p ? p.emoji : "•";
+  node.querySelector(".nm").textContent  = p ? (id === uid ? "You" : p.name) : "—";
+}
+
+function buildBoard(){
+  const sig = show.id + "|" + [...crossed].sort().join(",") + "|" + G.identity;
+  if (el.board.dataset.sig === sig) return;
+  el.board.dataset.sig = sig;
+  el.board.innerHTML = "";
+
+  show.characters.forEach((c, i) => {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "card" + (crossed.has(c.id) ? " crossed" : "") +
+                     (c.id === G.identity ? " mine" : "");
+    card.style.setProperty("--h", show.hue);
+    card.innerHTML = `
+      <span class="card-ch">${String(i + 1).padStart(2, "0")}</span>
+      <span class="thumb">
+        <img alt="" loading="lazy">
+        <span class="testcard"><span class="bars"></span><span class="ini"></span></span>
+      </span>
+      <span class="card-name"></span>`;
+    card.querySelector(".ini").textContent = c.ini;
+    card.querySelector(".card-name").textContent = c.name;
+
+    const img = card.querySelector("img");
+    img.addEventListener("error", () => card.classList.add("noimg"));
+    img.src = c.img;
+
+    card.addEventListener("click", () => openSheet(c));
+    el.board.appendChild(card);
+  });
+}
+
+/* ── clock ──────────────────────────────────────────────────── */
+function startClock(){
+  clearInterval(clockTimer);
+  const tick = () => {
+    const t0 = G.meta && G.meta.turnStartedAt;
+    el.clock.textContent = typeof t0 === "number" ? mmss(now() - t0) : "0:00";
+    el.clockLabel.textContent = G.meta && G.meta.turn === uid ? "Your turn" : "Their turn";
+  };
+  tick();
+  clockTimer = setInterval(tick, 500);
+}
+
+/* ── card action sheet ──────────────────────────────────────── */
+function openSheet(c){
+  openCard = c;
+  el.sheetName.textContent = c.name;
+  el.sheetConfirm.hidden = true;
+  el.actCross.dataset.on = crossed.has(c.id) ? "1" : "0";
+  el.actCrossLabel.textContent = crossed.has(c.id) ? "Undo cross" : "Cross off";
+  const myTurn = G.meta && G.meta.turn === uid && G.meta.status === "playing";
+  el.actGuess.disabled = !myTurn || !!G.pending;
+  el.overlay.hidden = false;
+}
+function closeSheet(){ el.overlay.hidden = true; openCard = null; }
+
+el.actCross.addEventListener("click", () => {
+  if (!openCard) return;
+  crossed.has(openCard.id) ? crossed.delete(openCard.id) : crossed.add(openCard.id);
+  saveCrosses();
+  buildBoard();
+  el.actCross.dataset.on = crossed.has(openCard.id) ? "1" : "0";
+  el.actCrossLabel.textContent = crossed.has(openCard.id) ? "Undo cross" : "Cross off";
+});
+
+el.actGuess.addEventListener("click", () => {
+  if (!openCard) return;
+  el.confirmName.textContent = openCard.name;
+  el.sheetConfirm.hidden = false;
+});
+el.confirmNo.addEventListener("click", () => { el.sheetConfirm.hidden = true; });
+el.confirmYes.addEventListener("click", async () => {
+  if (!openCard) return;
+  const target = openCard.id;
+  closeSheet();
+  await set(ref(db, `games/${gameId}/pendingGuess`),
+            { by: uid, target, at: serverTimestamp() });
+});
+el.sheetClose.addEventListener("click", closeSheet);
+el.overlay.addEventListener("click", e => { if (e.target === el.overlay) closeSheet(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeSheet(); });
+
+el.btnEnd.addEventListener("click", () => {
+  if (!G.meta || G.meta.turn !== uid) return;
+  update(ref(db, `games/${gameId}/meta`), {
+    turn: otherUid(), turnStartedAt: serverTimestamp()
+  });
+});
+
+/* ── adjudication ───────────────────────────────────────────
+   Only the player being guessed can check the answer, because
+   only they can read their own identity. They write the verdict.
+   ──────────────────────────────────────────────────────────── */
+async function adjudicate(){
+  const p = G.pending;
+  if (!p || adjudicating) return;
+  if (p.by === uid) return;                 // the guesser never judges
+  if (!G.identity || !show) return;
+
+  adjudicating = true;
+  const correct = p.target === G.identity;
+  const guesser = p.by;
+  const targetName = (show.characters.find(c => c.id === p.target) || {}).name || p.target;
+
+  try {
+    await push(ref(db, `games/${gameId}/log`), {
+      by: guesser, byName: G.players[guesser] ? G.players[guesser].name : "?",
+      target: p.target, targetName, correct, at: serverTimestamp()
+    });
+    if (correct){
+      await update(ref(db, `games/${gameId}/meta`), { status: "finished", winner: guesser });
+    } else {
+      await update(ref(db, `games/${gameId}/meta`), {
+        turn: uid, turnStartedAt: serverTimestamp()
+      });
+    }
+    await remove(ref(db, `games/${gameId}/pendingGuess`));
+  } catch (err){
+    console.warn("adjudication failed", err);
+  } finally {
+    adjudicating = false;
+  }
+}
+
+/* wrong guesses cross themselves off on the guesser's board */
+function onLog(){
+  if (!G.log) return;
+  let changed = false;
+  Object.values(G.log).forEach(e => {
+    if (e.by === uid && !e.correct && !crossed.has(e.target)){
+      crossed.add(e.target); changed = true;
+    }
+  });
+  if (changed){ saveCrosses(); buildBoard(); }
+}
+
+function renderFeed(){
+  el.feed.innerHTML = "";
+  const rows = Object.values(G.log || {}).sort((a,b) => (b.at || 0) - (a.at || 0)).slice(0, 6);
+  rows.forEach(e => {
+    const li = document.createElement("li");
+    const who = e.by === uid ? "You" : e.byName;
+    li.innerHTML = `<span></span> <span class="${e.correct ? "hit" : "miss"}"></span>`;
+    li.children[0].textContent = `${who} guessed ${e.targetName} —`;
+    li.children[1].textContent = e.correct ? "correct" : "wrong";
+    el.feed.appendChild(li);
+  });
+}
+
+/* ── result ─────────────────────────────────────────────────── */
+function renderFinished(){
+  clearInterval(clockTimer);
+  screen("result");
+
+  if (!revealPublished && G.identity){
+    revealPublished = true;
+    set(ref(db, `games/${gameId}/reveal/${uid}`), G.identity);
+  }
+
+  const iWon = G.meta.winner === uid;
+  el.resultVerdict.textContent = iWon ? "You win" : "You lose";
+  el.resultVerdict.className = "result-verdict " + (iWon ? "win" : "lose");
+
+  const them = otherUid();
+  const themName = G.players[them] ? G.players[them].name : "Your opponent";
+  el.resultLine.textContent = iWon
+    ? `You named ${themName}'s character.`
+    : `${themName} named your character first.`;
+
+  const s = SHOWS.find(x => x.id === G.meta.show);
+  const nameOf = id => {
+    const c = s && s.characters.find(c => c.id === id);
+    return c ? c.name : "…";
+  };
+  const rv = G.revealData || {};
+  el.reveal.innerHTML = `
+    <div class="r"><div class="rl">You were</div><div class="rn" id="rv-me"></div></div>
+    <div class="r"><div class="rl">${themName} was</div><div class="rn" id="rv-them"></div></div>`;
+  $("rv-me").textContent   = nameOf(rv[uid] || G.identity);
+  $("rv-them").textContent = nameOf(rv[them]);
+}
+
+async function backToLobby(){
+  clearInterval(clockTimer);
+  dropListeners();
+  const oldGame = gameId;
+  gameId = null; show = null; crossed = new Set();
+  el.board.dataset.sig = ""; el.showpick.innerHTML = "";
+  el.overlay.hidden = true;
+  if (oldGame){
+    try { localStorage.removeItem(crossKey(oldGame)); } catch(e){}
+    try { await set(ref(db, `games/${oldGame}/presence/${uid}`), false); } catch(e){}
+  }
+  await update(ref(db, `lobby/${uid}`), { gameId: null, ready: false, seat: null });
+  startLobby();
+  toast("Back in the lobby. Ready up when you are.");
+}
+el.btnAgain.addEventListener("click", backToLobby);
+$("btn-leave").addEventListener("click", backToLobby);
+
+/* ── local, private cross-offs ──────────────────────────────── */
+function crossKey(gid){ return `tally:${gid}:${uid}`; }
+function loadCrosses(gid){
+  try { return new Set(JSON.parse(localStorage.getItem(crossKey(gid)) || "[]")); }
+  catch(e){ return new Set(); }
+}
+function saveCrosses(){
+  try { localStorage.setItem(crossKey(gameId), JSON.stringify([...crossed])); } catch(e){}
+}
