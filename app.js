@@ -12,11 +12,25 @@ import { getDatabase, ref, set, update, remove, onValue, onDisconnect,
 
 import { SHOWS } from "./characters.js";
 
-/* ─────────────────────────────────────────────────────────────
-   1. PASTE YOUR FIREBASE CONFIG HERE
-   Firebase Console → Project settings → Your apps → Web app.
-   databaseURL only appears once a Realtime Database exists.
-   ───────────────────────────────────────────────────────────── */
+
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyDtnYxGeHJOcOapL6qzFoU_m2mcfCMcCtE",
+  authDomain: "guesswhogame-2702f.firebaseapp.com",
+  projectId: "guesswhogame-2702f",
+  storageBucket: "guesswhogame-2702f.firebasestorage.app",
+  messagingSenderId: "762175949107",
+  appId: "1:762175949107:web:d8ebbc5897b96bbb169646"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+
 const FIREBASE_CONFIG = {
   apiKey:            "PASTE_API_KEY",
   authDomain:        "PASTE_PROJECT.firebaseapp.com",
