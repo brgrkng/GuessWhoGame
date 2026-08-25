@@ -116,11 +116,11 @@ function dropListeners(){ unsubs.forEach(f => { try { f(); } catch(e){} }); unsu
    BOOT
    ============================================================ */
 (async function boot(){
-  if (firebaseConfig.apiKey === "PASTE_API_KEY"){
+  if (FIREBASE_CONFIG.apiKey === "PASTE_API_KEY"){
     return fail("No Firebase config yet. Open app.js and fill in FIREBASE_CONFIG near the top.");
   }
   try {
-    const app = initializeApp(firebaseConfig);
+    const app = initializeApp(FIREBASE_CONFIG);
     db   = getDatabase(app);
     auth = getAuth(app);
 
