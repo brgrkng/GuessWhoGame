@@ -6,32 +6,42 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
-import { getDatabase, ref, set, update, remove, onValue, onDisconnect,
+import { getDatabase, ref, set, get, update, remove, onValue, onDisconnect,
          runTransaction, serverTimestamp, push }
   from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
 
 import { SHOWS } from "./characters.js";
 
-
-// Import the functions you need from the SDKs you need
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
-
-// Your web app's Firebase configuration
-const firebaseConfig = {
-  apiKey: "AIzaSyDtnYxGeHJOcOapL6qzFoU_m2mcfCMcCtE",
-  authDomain: "guesswhogame-2702f.firebaseapp.com",
-  databaseURL: "https://guesswhogame-2702f-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "guesswhogame-2702f",
-  storageBucket: "guesswhogame-2702f.firebasestorage.app",
+/* ─────────────────────────────────────────────────────────────
+   1. PASTE YOUR FIREBASE CONFIG HERE
+   Firebase Console → Project settings → Your apps → Web app.
+   databaseURL only appears once a Realtime Database exists.
+   ───────────────────────────────────────────────────────────── */
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyDtnYxGeHJOcOapL6qzFoU_m2mcfCMcCtE",
+  authDomain:        "guesswhogame-2702f.firebaseapp.com",
+  databaseURL:       "https://guesswhogame-2702f-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId:         "guesswhogame-2702f",
+  storageBucket:     "guesswhogame-2702f.firebasestorage.app",
   messagingSenderId: "762175949107",
-  appId: "1:762175949107:web:d8ebbc5897b96bbb169646"
+  appId:             "1:762175949107:web:d8ebbc5897b96bbb169646"
 };
 
 
 const EMOJIS = ["🦊","🐼","🐙","🐸","🦖","🐝","🦉","🐺",
                 "🦈","🐧","🦩","🐲","👽","🤖","🎃","👻",
                 "🍕","🍩","🌮","⚡","🔥","🌙","⭐","🎧"];
+
+/* A player's only pointer to their game used to live in their lobby entry,
+   which onDisconnect deletes — so a refresh orphaned the game. These keys
+   let a reloaded tab find its way back in. */
+const LS_ME   = "tally:me";
+const LS_GAME = "tally:active";
+const store = {
+  get(k){ try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } },
+  set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} },
+  drop(k){ try { localStorage.removeItem(k); } catch(e){} }
+};
 
 /* ── element shorthand ──────────────────────────────────────── */
 const $ = id => document.getElementById(id);
@@ -117,19 +127,36 @@ function dropListeners(){ unsubs.forEach(f => { try { f(); } catch(e){} }); unsu
     onValue(ref(db, ".info/serverTimeOffset"), s => { serverOffset = s.val() || 0; });
 
     await signInAnonymously(auth);
-    onAuthStateChanged(auth, user => {
+    onAuthStateChanged(auth, async user => {
       if (!user) return;
       uid = user.uid;
-      startLobby();
+      const resumed = await tryResume();
+      if (!resumed) startLobby();
     });
   } catch (err){
-    if (String(err.code).includes("operation-not-allowed")){
-      fail("Anonymous sign-in is switched off. Firebase Console → Authentication → Sign-in method → enable Anonymous, then reload.");
-    } else {
-      fail("Could not reach Firebase: " + (err.message || err));
-    }
+    fail(explainAuthError(err));
   }
 })();
+
+function explainAuthError(err){
+  const code = String(err && err.code || "");
+  const msg  = String(err && err.message || err);
+  if (code.includes("admin-restricted-operation") || code.includes("operation-not-allowed"))
+    return "Anonymous sign-in is switched off for this project. Firebase Console → "
+         + "Authentication → Sign-in method → Anonymous → Enable, then hard-refresh.";
+  if (code.includes("configuration-not-found"))
+    return "This project has no authentication set up yet. Firebase Console → "
+         + "Authentication → Get started, then enable Anonymous.";
+  if (code.includes("api-key-not-valid") || code.includes("invalid-api-key"))
+    return "That apiKey isn't valid for this project. Re-copy the config from "
+         + "Project settings → Your apps.";
+  if (code.includes("requests-from-referer") || code.includes("requests-to-this-api"))
+    return "The API key is restricted and this domain isn't on the list. Google Cloud "
+         + "Console → APIs & Services → Credentials → your browser key → Website restrictions.";
+  if (code.includes("network-request-failed"))
+    return "The sign-in request never reached Firebase. Check the connection, then reload.";
+  return "Sign-in failed" + (code ? ` (${code})` : "") + ". " + msg;
+}
 
 function fail(msg){
   screen("boot");
@@ -142,6 +169,15 @@ function fail(msg){
    ============================================================ */
 function startLobby(){
   buildEmojiGrid();
+  const saved = store.get(LS_ME);
+  if (saved && !el.nameInput.value){
+    el.nameInput.value = saved.name || "";
+    if (saved.emoji){
+      me.emoji = saved.emoji;
+      [...el.emojiGrid.children].forEach(c =>
+        c.setAttribute("aria-pressed", String(c.textContent === saved.emoji)));
+    }
+  }
   screen("lobby");
 
   track(onValue(ref(db, "lobby"), snap => {
@@ -150,6 +186,32 @@ function startLobby(){
     const mine = lobbySnapshot[uid];
     if (mine && mine.gameId && mine.gameId !== gameId) enterGame(mine.gameId);
   }));
+}
+
+/* Rejoin a game this browser was already in — the lobby entry that used to
+   point at it is gone after a reload, so the pointer is kept locally. */
+async function tryResume(){
+  const gid = store.get(LS_GAME);
+  if (!gid) return false;
+  try {
+    const [pSnap, sSnap] = await Promise.all([
+      get(ref(db, `games/${gid}/players/${uid}`)),
+      get(ref(db, `games/${gid}/meta/status`))
+    ]);
+    if (!pSnap.exists() || !sSnap.exists() || sSnap.val() === "finished"){
+      store.drop(LS_GAME);
+      return false;
+    }
+    const p = pSnap.val() || {};
+    me.name = p.name || ""; me.emoji = p.emoji || "";
+    buildEmojiGrid();
+    enterGame(gid);
+    toast("Rejoined your game.");
+    return true;
+  } catch (err){
+    store.drop(LS_GAME);
+    return false;
+  }
 }
 
 function buildEmojiGrid(){
@@ -217,6 +279,7 @@ el.btnJoin.addEventListener("click", async () => {
       name, emoji: me.emoji, ready: false, gameId: null, joinedAt: serverTimestamp()
     });
     onDisconnect(ref(db, `lobby/${uid}`)).remove();
+    store.set(LS_ME, { name, emoji: me.emoji });
     el.btnJoin.textContent = "You're in the lobby";
   } catch (err){
     el.btnJoin.disabled = false;
@@ -296,6 +359,7 @@ function enterGame(gid){
   crossed = loadCrosses(gid);
   assigning = false;
   el.board.dataset.sig = "";
+  store.set(LS_GAME, gid);
 
   const base = `games/${gid}`;
   set(ref(db, `${base}/presence/${uid}`), true);
@@ -357,6 +421,17 @@ function renderChoosing(){
   }
 
   maybeDeal();
+  watchStall(!iPick);
+}
+
+/* Nothing here can fail loudly — if the other player's tab is gone, this
+   screen would otherwise spin forever with no explanation. */
+function watchStall(waiting){
+  clearTimeout(watchStall._t);
+  const note = $("show-stall");
+  if (!waiting){ note.hidden = true; return; }
+  if (!note.hidden) return;
+  watchStall._t = setTimeout(() => { note.hidden = false; }, 12000);
 }
 
 /* Seat 2 picks the show; seat 1 deals the two secret characters.
@@ -586,6 +661,8 @@ function renderFeed(){
 /* ── result ─────────────────────────────────────────────────── */
 function renderFinished(){
   clearInterval(clockTimer);
+  clearTimeout(watchStall._t);
+  store.drop(LS_GAME);
   screen("result");
 
   if (!revealPublished && G.identity){
@@ -623,16 +700,27 @@ async function backToLobby(){
   gameId = null; show = null; crossed = new Set();
   el.board.dataset.sig = ""; el.showpick.innerHTML = "";
   el.overlay.hidden = true;
+  clearTimeout(watchStall._t);
+  $("show-stall").hidden = true;
+  store.drop(LS_GAME);
   if (oldGame){
     try { localStorage.removeItem(crossKey(oldGame)); } catch(e){}
     try { await set(ref(db, `games/${oldGame}/presence/${uid}`), false); } catch(e){}
   }
-  await update(ref(db, `lobby/${uid}`), { gameId: null, ready: false, seat: null });
+  if (me.name){
+    await set(ref(db, `lobby/${uid}`), {
+      name: me.name, emoji: me.emoji, ready: false, gameId: null, joinedAt: serverTimestamp()
+    });
+    onDisconnect(ref(db, `lobby/${uid}`)).remove();
+    el.btnJoin.disabled = true;
+    el.btnJoin.textContent = "You're in the lobby";
+  }
   startLobby();
   toast("Back in the lobby. Ready up when you are.");
 }
 el.btnAgain.addEventListener("click", backToLobby);
 $("btn-leave").addEventListener("click", backToLobby);
+$("btn-leave-show").addEventListener("click", backToLobby);
 
 /* ── local, private cross-offs ──────────────────────────────── */
 function crossKey(gid){ return `tally:${gid}:${uid}`; }
