@@ -9,6 +9,44 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
+<script>
+/* Boot watchdog. Plain script, not a module, so it still runs even when
+   the module graph fails to load — which is the case app.js can't report
+   on its own. Remove once everything works if you like. */
+(function(){
+  function say(msg){
+    var n = document.getElementById("boot-status");
+    if (!n) { console.error(msg); return; }
+    n.textContent = msg;
+    n.classList.add("bad");
+  }
+  if (location.protocol === "file:"){
+    return document.addEventListener("DOMContentLoaded", function(){
+      say("Opened as a file. ES modules need a real server — run "
+        + "`python3 -m http.server` in this folder, or use the GitHub Pages URL.");
+    });
+  }
+  window.addEventListener("error", function(e){
+    var t = e.target;
+    if (t && (t.tagName === "SCRIPT" || t.tagName === "LINK")){
+      say("Could not load " + (t.src || t.href) + " — check the filename, its "
+        + "capitalisation, and that it sits next to index.html.");
+    } else {
+      say("Script error: " + (e.message || e));
+    }
+  }, true);
+  window.addEventListener("unhandledrejection", function(e){
+    var r = e.reason || {};
+    say("Failed: " + (r.code ? r.code + " — " : "") + (r.message || r));
+  });
+  setTimeout(function(){
+    var n = document.getElementById("boot-status");
+    if (n && n.textContent.indexOf("Connecting") === 0){
+      say("Boot never finished. Open DevTools → Console and Network for the real error.");
+    }
+  }, 8000);
+})();
+</script>
 </head>
 <body>
 
