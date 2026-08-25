@@ -22,6 +22,7 @@ import { initializeApp } from "firebase/app";
 const firebaseConfig = {
   apiKey: "AIzaSyDtnYxGeHJOcOapL6qzFoU_m2mcfCMcCtE",
   authDomain: "guesswhogame-2702f.firebaseapp.com",
+  databaseURL: "https://guesswhogame-2702f-default-rtdb.asia-southeast1.firebasedatabase.app",
   projectId: "guesswhogame-2702f",
   storageBucket: "guesswhogame-2702f.firebasestorage.app",
   messagingSenderId: "762175949107",
