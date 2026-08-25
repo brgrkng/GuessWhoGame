@@ -29,18 +29,6 @@ const firebaseConfig = {
   appId: "1:762175949107:web:d8ebbc5897b96bbb169646"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-
-const FIREBASE_CONFIG = {
-  apiKey:            "PASTE_API_KEY",
-  authDomain:        "PASTE_PROJECT.firebaseapp.com",
-  databaseURL:       "https://PASTE_PROJECT-default-rtdb.firebaseio.com",
-  projectId:         "PASTE_PROJECT",
-  storageBucket:     "PASTE_PROJECT.appspot.com",
-  messagingSenderId: "PASTE_SENDER_ID",
-  appId:             "PASTE_APP_ID"
-};
 
 const EMOJIS = ["🦊","🐼","🐙","🐸","🦖","🐝","🦉","🐺",
                 "🦈","🐧","🦩","🐲","👽","🤖","🎃","👻",
@@ -119,11 +107,11 @@ function dropListeners(){ unsubs.forEach(f => { try { f(); } catch(e){} }); unsu
    BOOT
    ============================================================ */
 (async function boot(){
-  if (FIREBASE_CONFIG.apiKey === "PASTE_API_KEY"){
+  if (firebaseConfig.apiKey === "PASTE_API_KEY"){
     return fail("No Firebase config yet. Open app.js and fill in FIREBASE_CONFIG near the top.");
   }
   try {
-    const app = initializeApp(FIREBASE_CONFIG);
+    const app = initializeApp(firebaseConfig);
     db   = getDatabase(app);
     auth = getAuth(app);
 
