@@ -18,15 +18,14 @@ import { SHOWS } from "./characters.js";
    databaseURL only appears once a Realtime Database exists.
    ───────────────────────────────────────────────────────────── */
 const FIREBASE_CONFIG = {
-  apiKey:            "AIzaSyDtnYxGeHJOcOapL6qzFoU_m2mcfCMcCtE",
-  authDomain:        "guesswhogame-2702f.firebaseapp.com",
-  databaseURL:       "https://guesswhogame-2702f-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId:         "guesswhogame-2702f",
-  storageBucket:     "guesswhogame-2702f.firebasestorage.app",
-  messagingSenderId: "762175949107",
-  appId:             "1:762175949107:web:d8ebbc5897b96bbb169646"
+  apiKey:            "PASTE_API_KEY",
+  authDomain:        "PASTE_PROJECT.firebaseapp.com",
+  databaseURL:       "https://PASTE_PROJECT-default-rtdb.firebaseio.com",
+  projectId:         "PASTE_PROJECT",
+  storageBucket:     "PASTE_PROJECT.appspot.com",
+  messagingSenderId: "PASTE_SENDER_ID",
+  appId:             "PASTE_APP_ID"
 };
-
 
 const EMOJIS = ["🦊","🐼","🐙","🐸","🦖","🐝","🦉","🐺",
                 "🦈","🐧","🦩","🐲","👽","🤖","🎃","👻",
@@ -88,6 +87,8 @@ let serverOffset = 0;
 let openCard = null;
 let adjudicating = false;
 let assigning = false;
+let dealTimer = null;
+let dealFallback = false;
 let revealPublished = false;
 
 /* ── helpers ────────────────────────────────────────────────── */
@@ -358,6 +359,7 @@ function enterGame(gid){
   show = null;
   crossed = loadCrosses(gid);
   assigning = false;
+  clearDealFallback();
   el.board.dataset.sig = "";
   store.set(LS_GAME, gid);
 
@@ -422,6 +424,7 @@ function renderChoosing(){
 
   maybeDeal();
   watchStall(!iPick);
+  if (picked) armDealFallback();
 }
 
 /* Nothing here can fail loudly — if the other player's tab is gone, this
@@ -434,37 +437,68 @@ function watchStall(waiting){
   watchStall._t = setTimeout(() => { note.hidden = false; }, 12000);
 }
 
-/* Seat 2 picks the show; seat 1 deals the two secret characters.
-   Splitting the two jobs means neither player's client ever chooses
-   the show AND the answers. See README for the airtight version. */
+/* Seat 2 picks the show; seat 1 deals the two secret characters, so neither
+   client both chooses the show and knows the answers. If seat 1 doesn't deal
+   within a few seconds — closed tab, failed write — seat 2 deals instead
+   rather than leaving the game deadlocked. */
+function armDealFallback(){
+  if (dealTimer || mySeat() !== 2) return;
+  dealTimer = setTimeout(() => {
+    dealFallback = true;
+    console.warn("[tally] seat 1 never dealt — dealing from seat 2");
+    maybeDeal();
+  }, 6000);
+}
+function clearDealFallback(){
+  clearTimeout(dealTimer);
+  dealTimer = null;
+  dealFallback = false;
+}
+
 async function maybeDeal(){
-  if (assigning || mySeat() !== 1) return;
-  if (!G.meta || G.meta.status !== "choosing" || !G.meta.show) return;
+  if (assigning) return;
+  if (!G.meta || !G.players) return;
+  if (G.meta.status !== "choosing" || !G.meta.show) return;
+  if (mySeat() !== 1 && !dealFallback) return;
+
+  const s   = SHOWS.find(x => x.id === G.meta.show);
+  const opp = otherUid();
+  if (!s || !opp){
+    console.error("[tally] cannot deal", { show: G.meta.show, opp, players: G.players });
+    return;
+  }
 
   assigning = true;
-  const s = SHOWS.find(x => x.id === G.meta.show);
-  const opp = otherUid();
-  const idx = new Set();
-  while (idx.size < 2) idx.add(Math.floor(Math.random() * s.characters.length));
-  const [a,b] = [...idx];
-
   try {
+    const n = s.characters.length;
+    const a = Math.floor(Math.random() * n);
+    let b; do { b = Math.floor(Math.random() * n); } while (b === a);
+
     await update(ref(db, `games/${gameId}`), {
       [`identities/${uid}`]: s.characters[a].id,
       [`identities/${opp}`]: s.characters[b].id,
-      "meta/turn": uid,
+      "meta/turn": Object.keys(G.players).find(k => G.players[k].seat === 1) || uid,
       "meta/turnStartedAt": serverTimestamp(),
       "meta/status": "playing"
     });
+    clearDealFallback();
   } catch (err){
     assigning = false;
-    console.warn("deal failed", err);
+    console.error("[tally] deal failed", err);
+    toast("Couldn't deal the cards — check the console.");
   }
 }
+
+/* Handy in DevTools: tally() prints everything needed to diagnose a stall. */
+window.tally = () => ({
+  uid, gameId, seat: mySeat(), assigning, dealFallback,
+  meta: G.meta, players: G.players, identity: G.identity
+});
 
 /* ── the board ──────────────────────────────────────────────── */
 function renderPlaying(){
   screen("game");
+  clearDealFallback();
   show = SHOWS.find(s => s.id === G.meta.show);
   if (!show) return;
 
@@ -701,6 +735,7 @@ async function backToLobby(){
   el.board.dataset.sig = ""; el.showpick.innerHTML = "";
   el.overlay.hidden = true;
   clearTimeout(watchStall._t);
+  clearDealFallback();
   $("show-stall").hidden = true;
   store.drop(LS_GAME);
   if (oldGame){

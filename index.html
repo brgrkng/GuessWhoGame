@@ -14,11 +14,12 @@
    the module graph fails to load — which is the case app.js can't report
    on its own. Remove once everything works if you like. */
 (function(){
-  function say(msg){
+  function say(msg, raw){
+    console.error("[tally]", msg, raw || "");
     var n = document.getElementById("boot-status");
-    if (!n) { console.error(msg); return; }
-    n.textContent = msg;
-    n.classList.add("bad");
+    if (!n) return;
+    var booting = !document.getElementById("screen-boot").hidden;
+    if (booting){ n.textContent = msg; n.classList.add("bad"); }
   }
   if (location.protocol === "file:"){
     return document.addEventListener("DOMContentLoaded", function(){
@@ -32,12 +33,12 @@
       say("Could not load " + (t.src || t.href) + " — check the filename, its "
         + "capitalisation, and that it sits next to index.html.");
     } else {
-      say("Script error: " + (e.message || e));
+      say("Script error: " + (e.message || e), e.error);
     }
   }, true);
   window.addEventListener("unhandledrejection", function(e){
     var r = e.reason || {};
-    say("Failed: " + (r.code ? r.code + " — " : "") + (r.message || r));
+    say("Unhandled rejection: " + (r.code ? r.code + " — " : "") + (r.message || r), r);
   });
   setTimeout(function(){
     var n = document.getElementById("boot-status");
