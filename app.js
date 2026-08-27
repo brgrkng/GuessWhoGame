@@ -27,6 +27,10 @@ const FIREBASE_CONFIG = {
   appId:             "1:762175949107:web:d8ebbc5897b96bbb16964"
 };
 
+/* Bump on every deploy. The console line is how you prove a hard refresh
+   actually took - GitHub Pages caches app.js for ten minutes. */
+const BUILD = "2026-08-27b";
+
 const EMOJIS = ["🦊","🐼","🐙","🐸","🦖","🐝","🦉","🐺",
                 "🦈","🐧","🦩","🐲","👽","🤖","🎃","👻",
                 "🍕","🍩","🌮","⚡","🔥","🌙","⭐","🎧"];
@@ -81,7 +85,10 @@ let gameId = null;
 let G = { meta:null, players:null, log:null, pending:null, presence:null, identity:null };
 let show = null;                 // resolved show object
 let crossed = new Set();
-let unsubs = [];
+let unsubs = [];                 // game listeners only
+let lobbyUnsub = null;           // the lobby listener - outlives every game
+let leftGames = new Set();       // games we deliberately left; never re-enter one
+let joinTimer = null;
 let clockTimer = null;
 let serverOffset = 0;
 let openCard = null;
@@ -113,10 +120,24 @@ function otherUid(){
 function track(unsub){ unsubs.push(unsub); }
 function dropListeners(){ unsubs.forEach(f => { try { f(); } catch(e){} }); unsubs = []; }
 
+/* Everything async in here used to fail silently. It doesn't now: every
+   listener and every fire-and-forget write reports through logErr, and a
+   rules rejection - the likeliest cause and the least visible - also
+   surfaces on screen. */
+function logErr(where, err){
+  const code = String((err && err.code) || "");
+  const msg  = String((err && err.message) || err || "");
+  console.error("[tally] " + where + " failed:", code, msg, err);
+  if (/permission[_-]denied/i.test(code + " " + msg))
+    toast("Database rules blocked: " + where);
+}
+function fire(p, where){ return p.catch(err => logErr(where, err)); }
+
 /* ============================================================
    BOOT
    ============================================================ */
 (async function boot(){
+  console.log("[tally] build", BUILD);
   if (FIREBASE_CONFIG.apiKey === "PASTE_API_KEY"){
     return fail("No Firebase config yet. Open app.js and fill in FIREBASE_CONFIG near the top.");
   }
@@ -131,6 +152,8 @@ function dropListeners(){ unsubs.forEach(f => { try { f(); } catch(e){} }); unsu
     onAuthStateChanged(auth, async user => {
       if (!user) return;
       uid = user.uid;
+      buildEmojiGrid();
+      subscribeLobby();
       const resumed = await tryResume();
       if (!resumed) startLobby();
     });
@@ -180,13 +203,23 @@ function startLobby(){
     }
   }
   screen("lobby");
+  subscribeLobby();
+  renderRoster();   // buildEmojiGrid() above wiped the taken-emoji locking
+}
 
-  track(onValue(ref(db, "lobby"), snap => {
+/* Deliberately NOT tracked in `unsubs`. This listener has to outlive
+   enterGame(): it is the only thing that can correct a client which entered
+   the wrong game, and tearing it down on every enterGame() is what used to
+   strand a player on the lobby screen with no route back. */
+function subscribeLobby(){
+  if (lobbyUnsub) return;
+  lobbyUnsub = onValue(ref(db, "lobby"), snap => {
     lobbySnapshot = snap.val() || {};
     renderRoster();
     const mine = lobbySnapshot[uid];
-    if (mine && mine.gameId && mine.gameId !== gameId) enterGame(mine.gameId);
-  }));
+    if (mine && mine.gameId && mine.gameId !== gameId && !leftGames.has(mine.gameId))
+      enterGame(mine.gameId);
+  }, err => logErr("lobby listener", err));
 }
 
 /* Rejoin a game this browser was already in — the lobby entry that used to
@@ -226,7 +259,7 @@ function buildEmojiGrid(){
       me.emoji = e;
       [...el.emojiGrid.children].forEach(c =>
         c.setAttribute("aria-pressed", String(c.textContent === e)));
-      if (inLobby()) update(ref(db, `lobby/${uid}`), { emoji: e });
+      if (inLobby()) fire(update(ref(db, `lobby/${uid}`), { emoji: e }), "set emoji");
     });
     el.emojiGrid.appendChild(b);
   });
@@ -295,7 +328,7 @@ function hintSignon(msg){
 el.btnReady.addEventListener("click", () => {
   const mine = lobbySnapshot[uid];
   if (!mine) return;
-  update(ref(db, `lobby/${uid}`), { ready: !mine.ready });
+  fire(update(ref(db, `lobby/${uid}`), { ready: !mine.ready }), "ready up");
 });
 
 /* ── pairing ────────────────────────────────────────────────
@@ -312,6 +345,20 @@ async function tryMatch(){
   const gid = pendingGameId || (pendingGameId = push(ref(db, "games")).key);
 
   try {
+    /* applyLocally:false is load-bearing, not a tidy-up.
+
+       With the default (true), Firebase raises a local event for the
+       *tentative* pairing the instant this callback returns - before the
+       server has accepted anything. In a two-client race both clients write a
+       provisional pairing, so the loser's own lobby listener fired with a
+       gameId that was about to be rolled back. It called enterGame() on a game
+       nobody would ever create, and enterGame()'s dropListeners() took the
+       lobby listener down with it - so when the real gameId arrived moments
+       later, nothing was listening. That client sat on the lobby screen
+       forever while its opponent played on.
+
+       Suppressing the local echo means we only ever act on a pairing the
+       server has actually committed. */
     const res = await runTransaction(ref(db, "lobby"), lobby => {
       if (!lobby || !lobby[uid] || !lobby[uid].ready || lobby[uid].gameId) return;
       const waiting = Object.entries(lobby)
@@ -323,7 +370,7 @@ async function tryMatch(){
       pair[0][1].gameId = gid; pair[0][1].seat = 1;
       pair[1][1].gameId = gid; pair[1][1].seat = 2;
       return lobby;
-    });
+    }, { applyLocally: false });
 
     if (res.committed){
       const lobby = res.snapshot.val() || {};
@@ -331,7 +378,7 @@ async function tryMatch(){
       if (pair.length === 2 && pair.some(([k]) => k === uid)) await createGame(gid, pair);
     }
   } catch (err){
-    console.warn("pairing failed", err);
+    logErr("pairing", err);
   } finally {
     tryMatch._busy = false;
   }
@@ -351,6 +398,8 @@ async function createGame(gid, pair){
    GAME
    ============================================================ */
 function enterGame(gid){
+  if (gameId === gid) return;           // a repeat lobby event isn't news
+  console.log("[tally] entering game", gid);
   dropListeners();
   gameId = gid;
   pendingGameId = null;
@@ -362,31 +411,79 @@ function enterGame(gid){
   clearDealFallback();
   el.board.dataset.sig = "";
   store.set(LS_GAME, gid);
+  renderJoining();
+  armJoinWatch(gid);
 
   const base = `games/${gid}`;
-  set(ref(db, `${base}/presence/${uid}`), true);
+  fire(set(ref(db, `${base}/presence/${uid}`), true), "presence");
   onDisconnect(ref(db, `${base}/presence/${uid}`)).set(false);
 
-  track(onValue(ref(db, `${base}/meta`),       s => { G.meta = s.val();     render(); }));
-  track(onValue(ref(db, `${base}/players`),    s => { G.players = s.val();  render(); }));
-  track(onValue(ref(db, `${base}/presence`),   s => { G.presence = s.val(); render(); }));
-  track(onValue(ref(db, `${base}/pendingGuess`), s => { G.pending = s.val(); adjudicate(); render(); }));
-  track(onValue(ref(db, `${base}/log`),        s => { G.log = s.val();      onLog(); render(); }));
-  track(onValue(ref(db, `${base}/identities/${uid}`), s => {
-    G.identity = s.val(); adjudicate(); render();
-  }));
-  track(onValue(ref(db, `${base}/reveal`),     s => { G.revealData = s.val(); render(); }));
+  /* Seven separate listeners, one per branch, because identities/$uid is
+     read-locked to its owner and a single listener on games/$gid would hand
+     both secrets to both players. Each one now carries an error callback. */
+  const on = (sub, fn) => track(onValue(ref(db, `${base}/${sub}`), fn,
+                                        err => logErr("listener " + sub, err)));
+
+  on("meta",              s => { G.meta = s.val();       joinOk(); render(); });
+  on("players",           s => { G.players = s.val();    joinOk(); render(); });
+  on("presence",          s => { G.presence = s.val();   render(); });
+  on("pendingGuess",      s => { G.pending = s.val();    adjudicate(); render(); });
+  on("log",               s => { G.log = s.val();        onLog(); render(); });
+  on(`identities/${uid}`, s => { G.identity = s.val();   adjudicate(); render(); });
+  on("reveal",            s => { G.revealData = s.val(); render(); });
+}
+
+/* -- join watchdog -------------------------------------------------------
+   Entering a game whose data never arrives was a silent freeze: render()
+   returned early on a null meta and left whatever screen was already up. Now
+   we notice, tell the two causes apart, and either self-heal or say so.
+   ----------------------------------------------------------------------- */
+function armJoinWatch(gid){
+  clearTimeout(joinTimer);
+  joinTimer = setTimeout(() => checkJoin(gid), 8000);
+}
+function joinOk(){
+  if (G.meta && G.players){ clearTimeout(joinTimer); joinTimer = null; }
+}
+async function checkJoin(gid){
+  if (gid !== gameId || (G.meta && G.players)) return;
+
+  let listed = false;
+  try { listed = (await get(ref(db, `games/${gid}/players/${uid}`))).exists(); }
+  catch (err){ return logErr("join check", err); }
+  if (gid !== gameId || (G.meta && G.players)) return;
+
+  if (listed){
+    console.error("[tally] game " + gid + " exists and lists us, but meta/players "
+      + "never arrived - check the read rules on those two branches");
+    return toast("Can't read this game. See the console.");
+  }
+  console.warn("[tally] game " + gid + " was never created - releasing the pairing");
+  await backToLobby("That pairing didn't take. Ready up again.");
 }
 
 function mySeat(){ return G.players && G.players[uid] ? G.players[uid].seat : null; }
 
 function render(){
-  if (!G.meta || !G.players) return;
+  if (!G.meta || !G.players){
+    if (gameId) renderJoining();
+    return;
+  }
   const st = G.meta.status;
 
   if (st === "choosing")      return renderChoosing();
   if (st === "playing")       return renderPlaying();
   if (st === "finished")      return renderFinished();
+}
+
+/* Shown while a game's data is still in flight. Reuses the show screen's
+   waiting block rather than adding a sixth screen. */
+function renderJoining(){
+  screen("show");
+  el.showpick.hidden = true;
+  el.showWaiting.hidden = false;
+  el.showSubtitle.textContent = "Joining";
+  el.showWaitingText.textContent = "Joining the game…";
 }
 
 /* ── show selection (seat 2 picks) ──────────────────────────── */
@@ -408,7 +505,7 @@ function renderChoosing(){
         b.innerHTML = `<span class="t"></span><span class="n">18 characters</span>`;
         b.querySelector(".t").textContent = s.title;
         b.addEventListener("click", () => {
-          update(ref(db, `games/${gameId}/meta`), { show: s.id });
+          fire(update(ref(db, `games/${gameId}/meta`), { show: s.id }), "pick show");
         });
         el.showpick.appendChild(b);
       });
@@ -484,14 +581,15 @@ async function maybeDeal(){
     clearDealFallback();
   } catch (err){
     assigning = false;
-    console.error("[tally] deal failed", err);
+    logErr("deal", err);
     toast("Couldn't deal the cards — check the console.");
   }
 }
 
 /* Handy in DevTools: tally() prints everything needed to diagnose a stall. */
 window.tally = () => ({
-  uid, gameId, seat: mySeat(), assigning, dealFallback,
+  build: BUILD, uid, gameId, seat: mySeat(), assigning, dealFallback,
+  lobbyEntry: lobbySnapshot[uid] || null, left: [...leftGames],
   meta: G.meta, players: G.players, identity: G.identity
 });
 
@@ -618,8 +716,8 @@ el.confirmYes.addEventListener("click", async () => {
   if (!openCard) return;
   const target = openCard.id;
   closeSheet();
-  await set(ref(db, `games/${gameId}/pendingGuess`),
-            { by: uid, target, at: serverTimestamp() });
+  await fire(set(ref(db, `games/${gameId}/pendingGuess`),
+                 { by: uid, target, at: serverTimestamp() }), "submit guess");
 });
 el.sheetClose.addEventListener("click", closeSheet);
 el.overlay.addEventListener("click", e => { if (e.target === el.overlay) closeSheet(); });
@@ -627,9 +725,9 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeSheet()
 
 el.btnEnd.addEventListener("click", () => {
   if (!G.meta || G.meta.turn !== uid) return;
-  update(ref(db, `games/${gameId}/meta`), {
+  fire(update(ref(db, `games/${gameId}/meta`), {
     turn: otherUid(), turnStartedAt: serverTimestamp()
-  });
+  }), "end turn");
 });
 
 /* ── adjudication ───────────────────────────────────────────
@@ -661,7 +759,7 @@ async function adjudicate(){
     }
     await remove(ref(db, `games/${gameId}/pendingGuess`));
   } catch (err){
-    console.warn("adjudication failed", err);
+    logErr("adjudication", err);
   } finally {
     adjudicating = false;
   }
@@ -701,7 +799,7 @@ function renderFinished(){
 
   if (!revealPublished && G.identity){
     revealPublished = true;
-    set(ref(db, `games/${gameId}/reveal/${uid}`), G.identity);
+    fire(set(ref(db, `games/${gameId}/reveal/${uid}`), G.identity), "publish reveal");
   }
 
   const iWon = G.meta.winner === uid;
@@ -727,10 +825,15 @@ function renderFinished(){
   $("rv-them").textContent = nameOf(rv[them]);
 }
 
-async function backToLobby(){
+async function backToLobby(msg){
   clearInterval(clockTimer);
+  clearTimeout(joinTimer);
   dropListeners();
   const oldGame = gameId;
+  /* The lobby listener now survives this, so it would happily drag us straight
+     back into the game we just left - our lobby entry still points at it until
+     the write below lands. */
+  if (oldGame) leftGames.add(oldGame);
   gameId = null; show = null; crossed = new Set();
   el.board.dataset.sig = ""; el.showpick.innerHTML = "";
   el.overlay.hidden = true;
@@ -751,11 +854,13 @@ async function backToLobby(){
     el.btnJoin.textContent = "You're in the lobby";
   }
   startLobby();
-  toast("Back in the lobby. Ready up when you are.");
+  toast(msg || "Back in the lobby. Ready up when you are.");
 }
-el.btnAgain.addEventListener("click", backToLobby);
-$("btn-leave").addEventListener("click", backToLobby);
-$("btn-leave-show").addEventListener("click", backToLobby);
+/* Wrapped, not passed directly - addEventListener would hand backToLobby the
+   click event as its message argument. */
+el.btnAgain.addEventListener("click", () => backToLobby());
+$("btn-leave").addEventListener("click", () => backToLobby());
+$("btn-leave-show").addEventListener("click", () => backToLobby());
 
 /* ── local, private cross-offs ──────────────────────────────── */
 function crossKey(gid){ return `tally:${gid}:${uid}`; }
