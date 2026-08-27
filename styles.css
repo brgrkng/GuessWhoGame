@@ -238,7 +238,7 @@ body{
   gap:10px;
 }
 .card{
-  position:relative;padding:0;cursor:pointer;text-align:left;
+  position:relative;padding:0;text-align:left;
   background:var(--panel);
   border:1px solid var(--rail);
   border-radius:var(--radius);
@@ -246,14 +246,44 @@ body{
   color:var(--phos);
   transition:transform .12s,border-color .12s;
 }
-.card:hover{transform:translateY(-3px);border-color:var(--phos-dim);}
-.card:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
+/* z-index so the grown card sits over its neighbours rather than under them */
+.card:hover{transform:scale(1.05);border-color:var(--phos-dim);z-index:5;}
 
 .card-ch{
   position:absolute;top:5px;left:6px;z-index:3;
   font-size:9px;letter-spacing:.06em;color:var(--phos-dim);
   background:rgba(0,0,0,.6);padding:1px 4px;border-radius:2px;
+  transition:opacity .12s;
 }
+/* the channel number shares a corner with the cross button, so it yields */
+.card:hover .card-ch{opacity:0;}
+
+/* ── on-card actions ────────────────────────────────────────
+   Kept at opacity:0 rather than visibility:hidden or display:none so they
+   stay in the tab order — hidden controls cannot take focus, which would
+   have made the board keyboard-unusable.
+   ──────────────────────────────────────────────────────────── */
+.card-act{
+  position:absolute;top:5px;z-index:4;
+  width:26px;height:26px;padding:0;
+  display:grid;place-items:center;
+  font-family:inherit;font-size:13px;line-height:1;cursor:pointer;
+  background:rgba(8,10,14,.86);
+  border:1px solid var(--rail);border-radius:3px;
+  color:var(--phos);
+  opacity:0;
+  transition:opacity .12s,border-color .12s,color .12s;
+}
+.act-x{left:5px;}
+.act-v{right:5px;}
+.card:hover .card-act,
+.card-act:focus-visible{opacity:1;}
+.card-act:focus-visible{outline:2px solid var(--amber);outline-offset:1px;}
+.act-x:hover{border-color:var(--tally);color:var(--tally);}
+.act-x[data-on="1"]{border-color:var(--tally);color:var(--tally);}
+.act-v:hover{border-color:var(--ok);color:var(--ok);}
+/* no guess button at all when it isn't your turn, or one is already pending */
+.act-v:disabled{display:none;}
 .thumb{display:block;position:relative;aspect-ratio:1;background:#0d0f13;overflow:hidden;}
 .thumb img{width:100%;height:100%;object-fit:cover;display:block;}
 .card.noimg .thumb img{display:none;}
@@ -332,20 +362,6 @@ body{
   box-shadow:0 28px 70px rgba(0,0,0,.6);
 }
 .sheet-name{font-size:29px;font-weight:600;line-height:1.05;margin-bottom:18px;}
-.sheet-actions{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
-.act{
-  display:flex;flex-direction:column;align-items:center;gap:7px;
-  padding:20px 10px;cursor:pointer;
-  background:var(--console);border:1px solid var(--rail);border-radius:2px;color:var(--phos);
-  transition:border-color .12s,background .12s;
-}
-.act:hover:not(:disabled){background:var(--panel-hi);}
-.act:disabled{opacity:.3;cursor:not-allowed;}
-.act-glyph{font-size:27px;line-height:1;}
-.act-label{font-size:14px;font-weight:600;}
-.act-cross:hover:not(:disabled){border-color:var(--phos-dim);}
-.act-cross[data-on="1"]{border-color:var(--tally);color:var(--tally);}
-.act-guess:hover:not(:disabled){border-color:var(--ok);color:var(--ok);}
 .sheet-confirm{margin-top:18px;padding-top:16px;border-top:1px solid var(--rail);}
 .sheet-confirm p{margin:0 0 14px;font-size:14px;line-height:1.55;}
 .sheet-confirm-actions{display:flex;gap:10px;}
@@ -391,6 +407,14 @@ body{
 }
 @media (max-width:400px){
   .emoji-grid{grid-template-columns:repeat(6,1fr);}
+}
+/* No hover on touch, so the actions can't be hover-revealed — show them
+   always, drop the grow (it sticks after a tap), and hide the channel
+   number that the cross button would otherwise sit on top of. */
+@media (hover:none){
+  .card-act{opacity:1;width:30px;height:30px;font-size:15px;}
+  .card-ch{display:none;}
+  .card:hover{transform:none;}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important;}

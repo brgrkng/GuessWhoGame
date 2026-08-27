@@ -68,8 +68,7 @@ const el = {
   seatMe: $("seat-me"), seatThem: $("seat-them"), btnEnd: $("btn-end"),
   turnBanner: $("turn-banner"), board: $("board"), feed: $("feed"),
   overlay: $("overlay"), sheetName: $("sheet-name"),
-  actCross: $("act-cross"), actCrossLabel: $("act-cross-label"), actGuess: $("act-guess"),
-  sheetConfirm: $("sheet-confirm"), confirmName: $("confirm-name"),
+  confirmName: $("confirm-name"),
   confirmNo: $("confirm-no"), confirmYes: $("confirm-yes"), sheetClose: $("sheet-close"),
   resultVerdict: $("result-verdict"), resultLine: $("result-line"),
   reveal: $("reveal"), btnAgain: $("btn-again"),
@@ -641,20 +640,36 @@ function renderSeat(node, id, live){
   node.querySelector(".nm").textContent  = p ? (id === uid ? "You" : p.name) : "—";
 }
 
+/* Turn and pending-guess are part of the key because the guess button's
+   availability depends on them — leave them out and the buttons go stale the
+   moment the turn changes. */
+function boardSig(){
+  return [show.id, [...crossed].sort().join(","), G.identity,
+          G.meta && G.meta.turn === uid ? "mine" : "theirs",
+          G.pending ? "pending" : "open"].join("|");
+}
+
 function buildBoard(){
-  const sig = show.id + "|" + [...crossed].sort().join(",") + "|" + G.identity;
+  if (!show) return;
+  const sig = boardSig();
   if (el.board.dataset.sig === sig) return;
   el.board.dataset.sig = sig;
   el.board.innerHTML = "";
 
+  const canGuess = G.meta && G.meta.status === "playing"
+                   && G.meta.turn === uid && !G.pending;
+
   show.characters.forEach((c, i) => {
-    const card = document.createElement("button");
-    card.type = "button";
+    /* A div, not a button: the two actions below are real buttons and nesting
+       a button inside a button is invalid markup. */
+    const card = document.createElement("div");
     card.className = "card" + (crossed.has(c.id) ? " crossed" : "") +
                      (c.id === G.identity ? " mine" : "");
     card.style.setProperty("--h", show.hue);
     card.innerHTML = `
       <span class="card-ch">${String(i + 1).padStart(2, "0")}</span>
+      <button type="button" class="card-act act-x">✕</button>
+      <button type="button" class="card-act act-v">✓</button>
       <span class="thumb">
         <img alt="" loading="lazy">
         <span class="testcard"><span class="bars"></span><span class="ini"></span></span>
@@ -667,9 +682,35 @@ function buildBoard(){
     img.addEventListener("error", () => card.classList.add("noimg"));
     img.src = c.img;
 
-    card.addEventListener("click", () => openSheet(c));
+    const x = card.querySelector(".act-x");
+    labelCross(x, c);
+    x.addEventListener("click", () => toggleCross(c, card, x));
+
+    const v = card.querySelector(".act-v");
+    v.disabled = !canGuess;
+    v.setAttribute("aria-label", `Lock in ${c.name} as your guess`);
+    v.addEventListener("click", () => openConfirm(c));
+
     el.board.appendChild(card);
   });
+}
+
+function labelCross(btn, c){
+  const on = crossed.has(c.id);
+  btn.dataset.on = on ? "1" : "0";
+  btn.setAttribute("aria-label", (on ? "Undo cross on " : "Cross off ") + c.name);
+}
+
+/* Toggles in place rather than calling buildBoard(). A rebuild would swap out
+   the very element the cursor is resting on, and the freshly created card
+   isn't hovered until the mouse moves again — the buttons would vanish
+   mid-click. Updating the cache key by hand keeps buildBoard() honest. */
+function toggleCross(c, card, btn){
+  crossed.has(c.id) ? crossed.delete(c.id) : crossed.add(c.id);
+  saveCrosses();
+  card.classList.toggle("crossed", crossed.has(c.id));
+  labelCross(btn, c);
+  el.board.dataset.sig = boardSig();
 }
 
 /* ── clock ──────────────────────────────────────────────────── */
@@ -684,34 +725,20 @@ function startClock(){
   clockTimer = setInterval(tick, 500);
 }
 
-/* ── card action sheet ──────────────────────────────────────── */
-function openSheet(c){
+/* ── guess confirmation ─────────────────────────────────────
+   Crossing off is instant and lives on the card. Only locking in a guess
+   still stops to ask, because it can lose you the game.
+   ──────────────────────────────────────────────────────────── */
+function openConfirm(c){
   openCard = c;
   el.sheetName.textContent = c.name;
-  el.sheetConfirm.hidden = true;
-  el.actCross.dataset.on = crossed.has(c.id) ? "1" : "0";
-  el.actCrossLabel.textContent = crossed.has(c.id) ? "Undo cross" : "Cross off";
-  const myTurn = G.meta && G.meta.turn === uid && G.meta.status === "playing";
-  el.actGuess.disabled = !myTurn || !!G.pending;
+  el.confirmName.textContent = c.name;
   el.overlay.hidden = false;
+  el.confirmYes.focus();
 }
 function closeSheet(){ el.overlay.hidden = true; openCard = null; }
 
-el.actCross.addEventListener("click", () => {
-  if (!openCard) return;
-  crossed.has(openCard.id) ? crossed.delete(openCard.id) : crossed.add(openCard.id);
-  saveCrosses();
-  buildBoard();
-  el.actCross.dataset.on = crossed.has(openCard.id) ? "1" : "0";
-  el.actCrossLabel.textContent = crossed.has(openCard.id) ? "Undo cross" : "Cross off";
-});
-
-el.actGuess.addEventListener("click", () => {
-  if (!openCard) return;
-  el.confirmName.textContent = openCard.name;
-  el.sheetConfirm.hidden = false;
-});
-el.confirmNo.addEventListener("click", () => { el.sheetConfirm.hidden = true; });
+el.confirmNo.addEventListener("click", closeSheet);
 el.confirmYes.addEventListener("click", async () => {
   if (!openCard) return;
   const target = openCard.id;

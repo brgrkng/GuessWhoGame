@@ -152,21 +152,13 @@
 
 </div>
 
-<!-- ══ CARD ACTION SHEET ══ -->
+<!-- ══ GUESS CONFIRMATION ══
+     Cross-off and guess now live on the cards themselves; this is only the
+     "are you sure" step for locking one in. -->
 <div class="overlay" id="overlay" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-name">
     <div class="sheet-name" id="sheet-name">—</div>
-    <div class="sheet-actions">
-      <button class="act act-cross" id="act-cross">
-        <span class="act-glyph">✕</span>
-        <span class="act-label" id="act-cross-label">Cross off</span>
-      </button>
-      <button class="act act-guess" id="act-guess">
-        <span class="act-glyph">✓</span>
-        <span class="act-label">Guess</span>
-      </button>
-    </div>
-    <div class="sheet-confirm" id="sheet-confirm" hidden>
+    <div class="sheet-confirm" id="sheet-confirm">
       <p>Lock in <strong id="confirm-name">—</strong> as your opponent's character? A wrong guess hands them the turn.</p>
       <div class="sheet-confirm-actions">
         <button class="btn btn-ghost" id="confirm-no">Not yet</button>
