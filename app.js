@@ -18,13 +18,13 @@ import { SHOWS } from "./characters.js";
    databaseURL only appears once a Realtime Database exists.
    ───────────────────────────────────────────────────────────── */
 const FIREBASE_CONFIG = {
-  apiKey:            "PASTE_API_KEY",
-  authDomain:        "PASTE_PROJECT.firebaseapp.com",
-  databaseURL:       "https://PASTE_PROJECT-default-rtdb.firebaseio.com",
-  projectId:         "PASTE_PROJECT",
-  storageBucket:     "PASTE_PROJECT.appspot.com",
-  messagingSenderId: "PASTE_SENDER_ID",
-  appId:             "PASTE_APP_ID"
+  apiKey:            "AIzaSyDtnYxGeHJOcOapL6qzFoU_m2mcfCMcCtE",
+  authDomain:        "guesswhogame-2702f.firebaseapp.com",
+  databaseURL:       "https://guesswhogame-2702f-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId:         "guesswhogame-2702f",
+  storageBucket:     "guesswhogame-2702f.firebasestorage.app",
+  messagingSenderId: "762175949107",
+  appId:             "1:762175949107:web:d8ebbc5897b96bbb16964"
 };
 
 const EMOJIS = ["🦊","🐼","🐙","🐸","🦖","🐝","🦉","🐺",
